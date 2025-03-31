@@ -2,9 +2,13 @@ const express = require('express');
 const axios = require('axios');
 const https = require('https');
 const HttpsProxyAgent = require('https-proxy-agent');
+const cors = require('cors'); // Importiere das CORS-Paket
 
 const app = express();
 const port = 3000;
+
+// Middleware für CORS
+app.use(cors());  // CORS für alle Routen aktivieren
 
 // Setze den Proxy-Server (Brightdata)
 const proxyUrl = 'http://brd.superproxy.io:33335'; // Proxy-URL von Brightdata
