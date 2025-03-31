@@ -1,7 +1,10 @@
 const express = require('express');
 const axios = require('axios');
 const app = express();
+const cors = require('cors');
+app.use(cors());
 const port = 3000;
+
 
 // Middleware, um JSON zu verarbeiten
 app.use(express.json());
