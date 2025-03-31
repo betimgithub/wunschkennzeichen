@@ -1,7 +1,7 @@
 {
   "name": "wunschkennzeichen-server",
   "version": "1.0.0",
-  "description": "Ein Server für die Wunschkennzeichen API-Anfragen",
+  "description": "Server für Wunschkennzeichen API mit Proxy und CORS-Unterstützung",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,8 +9,13 @@
   "dependencies": {
     "axios": "^0.26.1",
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "https-proxy-agent": "^5.0.0"
   },
-  "author": "Dein Name",
+  "devDependencies": {},
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "author": "",
   "license": "ISC"
 }
