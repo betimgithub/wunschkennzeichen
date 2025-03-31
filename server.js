@@ -1,57 +1,53 @@
 const express = require('express');
-const fetch = require('node-fetch');
-const cors = require('cors');
+const axios = require('axios');
+const HttpsProxyAgent = require('https-proxy-agent');
 
+// Initialisiere Express
 const app = express();
 const port = 3000;
 
-// CORS Middleware
-app.use(cors());
-app.use(express.json());  // Body Parsing für POST Anfragen
+// Setze den Brightdata-Proxy (diese Werte solltest du mit deinen eigenen ersetzen)
+const proxyUrl = 'http://brd.superproxy.io:33335';  // Deine Proxy-URL
+const proxyAuth = 'brd-customer-hl_46ab8084-zone-datacenter_proxy1:1q735kkv57ub';  // Dein Authentifizierungsschlüssel
 
-// API-Route zum Abrufen der Service ID basierend auf dem RegionCode
-app.get('/api/service', async (req, res) => {
-  const regionCode = req.query.regionCode;
-  const apiUrl = `https://wunschkennzeichen.zulassung.de/api/registrationOfficeServices?regionCode=${regionCode}`;
-
-  try {
-    const response = await fetch(apiUrl);
-    const data = await response.json();
-    if (data.registrationOfficeServices.length > 0) {
-      const serviceId = data.registrationOfficeServices[0].registrationOfficeServiceId;
-      res.json({ serviceId });
-    } else {
-      res.status(404).json({ error: "Keine Service-ID gefunden" });
-    }
-  } catch (error) {
-    console.error("Fehler beim Abruf der Service-ID:", error);
-    res.status(500).json({ error: "Fehler beim Abrufen der Service-ID" });
-  }
+// Setze den Proxy-Agent
+const agent = new HttpsProxyAgent({
+  host: 'brd.superproxy.io',
+  port: 33335,
+  auth: proxyAuth,  // Authentifizierung mit deinem Brightdata-Schlüssel
 });
 
-// API-Route zum Prüfen der Verfügbarkeit eines Wunschkennzeichens
-app.post('/check', async (req, res) => {
-  const apiUrl = 'https://wunschkennzeichen.zulassung.de/api/check';
-  const payload = req.body;
-
+// API-Route, um die Anfrage durch den Proxy zu senden
+app.get('/api/check', async (req, res) => {
+  const { numberPlateText, registrationOfficeServiceId } = req.query;  // Extrahiere die benötigten Parameter aus der Anfrage
+  
   try {
-    const response = await fetch(apiUrl, {
-      method: 'POST',
+    // Sende die Anfrage an die Wunschkennzeichen-API durch den Brightdata-Proxy
+    const response = await axios.post('https://wunschkennzeichen.zulassung.de/api/check', {
+      numberPlateText: numberPlateText,
+      registrationOfficeServiceId: registrationOfficeServiceId,
+      vehicleType: 'CAR',
+      licensePlateType: 'REGULAR',
+      secondLineLength: null,
+      editableLength: 8,
+      startMonth: null,
+      endMonth: null
+    }, {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(payload),
+      httpsAgent: agent,  // Nutze den Proxy-Agent
     });
 
-    const data = await response.json();
-    res.json(data);
+    // Sende die Antwort an den Client
+    res.json(response.data);
   } catch (error) {
-    console.error("Fehler beim Abruf der Verfügbarkeit:", error);
-    res.status(500).json({ error: "Fehler beim Abrufen der Verfügbarkeit" });
+    console.error('Fehler beim Abruf:', error);
+    res.status(500).json({ error: 'Fehler beim Abruf der Daten' });
   }
 });
 
-// Server starten
+// Starte den Server
 app.listen(port, () => {
   console.log(`Server läuft auf http://localhost:${port}`);
 });
