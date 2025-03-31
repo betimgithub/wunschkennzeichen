@@ -10,12 +10,18 @@ const port = 3000;
 // Setze den Proxy-Server (Brightdata)
 const proxyUrl = 'http://brd.superproxy.io:33335'; // Proxy-URL von Brightdata
 const agent = new HttpsProxyAgent({
-  proxy: {
-    host: 'brd.superproxy.io',
-    port: 33335,
-    auth: 'brd-customer-hl_46ab8084-zone-datacenter_proxy1:1q735kkv57ub' // Dein Proxy-Authentifizierungsschlüssel
-  },
+  host: 'brd.superproxy.io',
+  port: 33335,
+  auth: 'brd-customer-hl_46ab8084-zone-datacenter_proxy1:1q735kkv57ub', // Dein Proxy-Authentifizierungsschlüssel
   rejectUnauthorized: false // SSL-Zertifikatsvalidierung deaktivieren
+});
+
+// Damit CORS funktioniert, stellen wir die entsprechenden Header ein
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  next();
 });
 
 // API-Route, die für die Anfrage zuständig ist
