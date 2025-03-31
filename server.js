@@ -3,7 +3,8 @@ const fetch = require('node-fetch');
 const HttpsProxyAgent = require('https-proxy-agent');
 const app = express();
 app.use(express.json());
-
+const cors = require('cors');
+app.use(cors());
 // Bright Data Proxy Zugang
 const BDATA = {
     host: 'brd.superproxy.io',
