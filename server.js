@@ -15,8 +15,8 @@ const PROXY_PASS = '1q735kkv57ub';
 app.use(cors());
 app.use(express.json());
 
-// Axios-Konfiguration mit Proxy
-const axiosProxy = axios.create({
+// Axios-Instanz mit Proxy-Konfiguration
+const axiosInstance = axios.create({
   proxy: {
     host: PROXY_HOST,
     port: PROXY_PORT,
@@ -31,8 +31,12 @@ const axiosProxy = axios.create({
 app.get('/api/service', async (req, res) => {
   const { regionCode } = req.query;
 
+  if (!regionCode) {
+    return res.status(400).json({ error: 'regionCode ist erforderlich' });
+  }
+
   try {
-    const response = await axiosProxy.get(
+    const response = await axiosInstance.get(
       `https://wunschkennzeichen.zulassung.de/api/registrationOfficeServices?regionCode=${regionCode}`
     );
 
@@ -48,7 +52,7 @@ app.post('/api/check', async (req, res) => {
   const payload = req.body;
 
   try {
-    const response = await axiosProxy.post(
+    const response = await axiosInstance.post(
       'https://wunschkennzeichen.zulassung.de/api/check',
       payload,
       {
