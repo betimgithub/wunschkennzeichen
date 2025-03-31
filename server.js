@@ -1,44 +1,41 @@
-const express = require("express");
-const axios = require("axios");
+const express = require('express');
+const axios = require('axios');
+const https = require('https');
+const HttpsProxyAgent = require('https-proxy-agent');
 
+// Initialisiere Express und erstelle eine Route
 const app = express();
-const PORT = process.env.PORT || 3000;
+const port = 3000;
 
-// Bright Data Proxy Info
-const proxyHost = "brd.superproxy.io";
-const proxyPort = 33335;
-const proxyUser = "brd-customer-hl_46ab8084-zone-datacenter_proxy1";
-const proxyPass = "1q735kkv57ub";
+// Setze den Proxy-Server (Brightdata)
+const proxyUrl = 'http://brd.superproxy.io:33335'; // Proxy-URL von Brightdata
+const agent = new HttpsProxyAgent({
+  proxy: {
+    host: 'brd.superproxy.io',
+    port: 33335,
+    auth: 'brd-customer-hl_46ab8084-zone-datacenter_proxy1:1q735kkv57ub' // Dein Proxy-Authentifizierungsschlüssel
+  },
+  rejectUnauthorized: false // SSL-Zertifikatsvalidierung deaktivieren
+});
 
-app.get("/api/service", async (req, res) => {
-  const { regionCode } = req.query;
+// API-Route, die für die Anfrage zuständig ist
+app.get('/api/service', async (req, res) => {
+  const regionCode = req.query.regionCode;
 
   try {
-    const response = await axios.get(
-      `https://wunschkennzeichen.zulassung.de/api/registrationOfficeServices?regionCode=${regionCode}`,
-      {
-        proxy: {
-          host: proxyHost,
-          port: proxyPort,
-          auth: {
-            username: proxyUser,
-            password: proxyPass,
-          },
-        },
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          Accept: "*/*"
-        }
-      }
-    );
+    // Sende eine Anfrage an die wunschkennzeichen API über den Proxy
+    const response = await axios.get(`https://wunschkennzeichen.zulassung.de/api/service?regionCode=${regionCode}`, { 
+      httpsAgent: agent 
+    });
 
-    res.json(response.data);
+    res.json(response.data); // Antwort an den Client zurücksenden
   } catch (error) {
-    console.error("Fehler beim Abruf:", error.message);
-    res.status(500).json({ error: "Fehler beim Abruf der Zulassungsstelle" });
+    console.error('Fehler beim Abruf:', error);
+    res.status(500).json({ error: 'Fehler beim Abruf der Daten' });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server läuft auf Port ${PORT}`);
+// Starte den Server
+app.listen(port, () => {
+  console.log(`Server läuft auf http://localhost:${port}`);
 });
