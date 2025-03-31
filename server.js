@@ -1,15 +1,9 @@
 const express = require('express');
 const axios = require('axios');
-const https = require('https');
-const HttpsProxyAgent = require('https-proxy-agent');
 
 // Initialisiere Express und erstelle eine Route
 const app = express();
 const port = 3000;
-
-// Setze den Proxy-Server (Brightdata)
-const proxyUrl = 'http://brd.superproxy.io:33335'; // Proxy-URL von Brightdata
-const agent = new HttpsProxyAgent(proxyUrl); // Proxy-Agent ohne zusätzliche Optionen
 
 // API-Route, die für die Anfrage zuständig ist
 app.get('/api/service', async (req, res) => {
@@ -20,15 +14,13 @@ app.get('/api/service', async (req, res) => {
   console.log(`Verwendete URL: ${url}`);
 
   try {
-    // Sende eine Anfrage an die API über den Proxy
-    const response = await axios.get(url, { 
-      httpsAgent: agent // Verwende den Proxy-Agenten
-    });
+    // Sende eine Anfrage an die API (ohne Proxy)
+    const response = await axios.get(url); // Axios ohne Proxy
 
     // Antwort an den Client zurücksenden
-    res.json(response.data);
+    res.json(response.data); // Antwortdaten im JSON-Format an den Client senden
   } catch (error) {
-    // Detailed error logging
+    // Fehlerprotokollierung
     console.error('Fehler beim Abruf:', error.response ? error.response.data : error.message);
     res.status(500).json({ error: 'Fehler beim Abruf der Daten' });
   }
