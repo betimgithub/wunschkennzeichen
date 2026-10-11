@@ -1,22 +1,27 @@
 --[[
     Halloween Farm (mit Overlay)
+
     1) Trick or Treat: läuft alle gespawnten "Trick or Treat!"-Flächen ab,
        bleibt auf jeder stehen, bis "Come back soon" erscheint, und geht
        dann zur nächsten. Flächen im Cooldown werden übersprungen und
        besucht, sobald sie wieder bereit sind.
-    2) Auto-Hatch: öffnet parallel "Creaking Egg" und "Halloween Chest".
+    2) Creaking Egg / Halloween Chest: Da sich das Ei nicht per Remote
+       öffnen lässt, teleportiert das Skript zwischendurch zur gespeicherten
+       Position, drückt E und läuft dann weiter zu den Häusern. Sind gerade
+       keine Häuser bereit, wird die Wartezeit am Ei verbracht.
 
-    Bedienung über das Overlay:
-      - Knöpfe schalten Trick or Treat / Auto-Hatch an und aus
-      - Titelleiste ziehen = Fenster verschieben
-      - X = Skript komplett beenden
-      - RightShift = Overlay ein-/ausblenden
-    Erneutes Ausführen beendet automatisch die alte Instanz.
+    Einrichtung (einmalig):
+      - Neben das Creaking Egg stellen -> "Pos" in der Ei-Zeile drücken
+      - Neben die Halloween Chest stellen -> "Pos" in der Chest-Zeile drücken
+      Positionen werden gespeichert (falls der Executor writefile kann).
+
+    Bedienung: Knöpfe = an/aus, Titelleiste ziehen = verschieben,
+    X = beenden, RightShift = Overlay ein-/ausblenden.
 ]]
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
 local player = Players.LocalPlayer
 
 ------------------------------------------------------------------------
@@ -24,38 +29,39 @@ local player = Players.LocalPlayer
 ------------------------------------------------------------------------
 local CONFIG = {
     TrickOrTreat = {
-        AutoStart = false,               -- true = beim Ausführen direkt starten
         ReadyText = "trick or treat",    -- Text, wenn die Fläche bereit ist
         CooldownText = "come back soon", -- Text nach dem Klopfen
         MinStandTime = 3,                -- Animation dauert ca. 3 Sekunden
         MaxStandTime = 10,               -- Abbruch, falls "Come back soon" nie kommt
         SkipFailedFor = 30,              -- fehlgeschlagene Fläche so lange ignorieren (s)
         HeightOffset = 3,                -- Abstand über der Fläche beim Teleport
-        ScanDelay = 1,                   -- Pause, wenn gerade keine Fläche bereit ist
+        ScanDelay = 1,                   -- Pause, wenn gerade nichts zu tun ist
         Debug = true,                    -- gefundene Flächen im Output anzeigen
     },
 
-    Hatch = {
-        AutoStart = false,
-        -- "Remote": feuert ein RemoteEvent / ruft eine RemoteFunction auf
-        -- "Prompt": löst den E-ProximityPrompt direkt aus (braucht fireproximityprompt)
-        Mode = "Remote",
-
-        -- Nur für Mode = "Remote": Pfad ab ReplicatedStorage
-        -- z. B. ReplicatedStorage.Remotes.HatchEgg -> { "Remotes", "HatchEgg" }
-        RemotePath = { "REMOTE_ORDNER", "REMOTE_NAME" },
-
-        -- Was geöffnet werden soll. Nicht gewünschte Einträge einfach löschen.
-        Targets = { "Creaking Egg", "Halloween Chest" },
-
-        -- Zusätzliche Argumente nach dem Namen, z. B. { 1 } für die Anzahl.
-        -- Gesendet wird: FireServer("Creaking Egg", table.unpack(ExtraArgs))
-        ExtraArgs = {},
-
-        Interval = 1,   -- Sekunden zwischen zwei Aufrufen
-        Verbose = false,
+    -- Orte, an denen E gedrückt wird. Reihenfolge = Priorität.
+    Stations = {
+        {
+            Key = "Chest",
+            Label = "Halloween Chest",
+            Interval = 300,     -- alle X Sekunden hingehen
+            Presses = 1,        -- wie oft E pro Besuch
+            PressDelay = 2,     -- Sekunden nach jedem E (Animation)
+            WhenIdle = false,   -- auch hingehen, wenn kein Haus bereit ist
+        },
+        {
+            Key = "Egg",
+            Label = "Creaking Egg",
+            Interval = 30,
+            Presses = 3,
+            PressDelay = 4,     -- Hatch-Animation abwarten
+            WhenIdle = true,    -- Wartezeit auf Häuser am Ei verbringen
+        },
     },
 
+    LoadDelay = 0.8,        -- nach Teleport warten, bis die Gegend geladen ist
+    KeyHoldTime = 0.15,     -- wie lange E gedrückt wird (bei Hold-Prompts erhöhen)
+    SaveFile = "halloween_farm_positions.json",
     ToggleGuiKey = Enum.KeyCode.RightShift,
 }
 ------------------------------------------------------------------------
@@ -66,11 +72,13 @@ local function running()
     return _G.HalloweenFarmRun == runId
 end
 
--- An/Aus-Zustand der Funktionen (wird von den Knöpfen gesetzt)
-local state = {
-    TrickOrTreat = CONFIG.TrickOrTreat.AutoStart,
-    Hatch = CONFIG.Hatch.AutoStart,
-}
+-- An/Aus-Zustand (wird von den Knöpfen gesetzt), alles startet aus
+local state = { TrickOrTreat = false }
+local stations = {} -- Key -> { cfg, cframe, last, count }
+for _, cfg in ipairs(CONFIG.Stations) do
+    state[cfg.Key] = false
+    stations[cfg.Key] = { cfg = cfg, cframe = nil, last = -math.huge, count = 0 }
+end
 
 -- Wird unten beim Bau des Overlays ersetzt
 local ui = {
@@ -80,6 +88,112 @@ local ui = {
 
 local function log(...)
     print("[HalloweenFarm]", ...)
+end
+
+local function getRoot()
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    if hrp and humanoid and humanoid.Health > 0 then
+        return hrp
+    end
+end
+
+local function teleport(hrp, cframe)
+    hrp.CFrame = cframe
+    hrp.AssemblyLinearVelocity = Vector3.zero
+end
+
+------------------------------------------------------------------------
+-- Positionen speichern / laden
+------------------------------------------------------------------------
+
+local function savePositions()
+    if typeof(writefile) ~= "function" then return end
+    local data = {}
+    for key, st in pairs(stations) do
+        if st.cframe then data[key] = { st.cframe:GetComponents() } end
+    end
+    pcall(function() writefile(CONFIG.SaveFile, HttpService:JSONEncode(data)) end)
+end
+
+local function loadPositions()
+    if typeof(readfile) ~= "function" or typeof(isfile) ~= "function" then return end
+    pcall(function()
+        if not isfile(CONFIG.SaveFile) then return end
+        local data = HttpService:JSONDecode(readfile(CONFIG.SaveFile))
+        for key, comps in pairs(data) do
+            if stations[key] and #comps == 12 then
+                stations[key].cframe = CFrame.new(table.unpack(comps))
+            end
+        end
+    end)
+end
+
+------------------------------------------------------------------------
+-- E drücken (VirtualInputManager, sonst keypress)
+------------------------------------------------------------------------
+
+local VirtualInputManager
+pcall(function() VirtualInputManager = game:GetService("VirtualInputManager") end)
+
+local function pressE()
+    if VirtualInputManager then
+        local ok = pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+            task.wait(CONFIG.KeyHoldTime)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        end)
+        if ok then return true end
+    end
+    if typeof(keypress) == "function" and typeof(keyrelease) == "function" then
+        local ok = pcall(function()
+            keypress(0x45) -- E
+            task.wait(CONFIG.KeyHoldTime)
+            keyrelease(0x45)
+        end)
+        if ok then return true end
+    end
+    return false
+end
+
+------------------------------------------------------------------------
+-- Stationen (Ei / Chest)
+------------------------------------------------------------------------
+
+local function visitStation(key, hrp)
+    local st = stations[key]
+    local cfg = st.cfg
+    local active = function() return running() and state[key] and hrp.Parent ~= nil end
+
+    teleport(hrp, st.cframe)
+    ui.setStatus(key, "Teleportiert, lade...")
+    task.wait(CONFIG.LoadDelay)
+
+    for i = 1, cfg.Presses do
+        if not active() then break end
+        -- Position halten, falls man weggeschoben wurde
+        if (hrp.Position - st.cframe.Position).Magnitude > 4 then
+            teleport(hrp, st.cframe)
+        end
+        if not pressE() then
+            state[key] = false
+            ui.refresh()
+            ui.setStatus(key, "Fehler: E-Taste kann nicht gesendet werden")
+            warn("[HalloweenFarm] Weder VirtualInputManager noch keypress funktionieren")
+            return
+        end
+        st.count += 1
+        ui.setStatus(key, string.format("E gedrückt (%d/%d) | Gesamt: %d", i, cfg.Presses, st.count))
+        task.wait(cfg.PressDelay)
+    end
+    st.last = os.clock()
+    ui.setStatus(key, "Gesamt: " .. st.count .. " | nächster Besuch in " .. cfg.Interval .. "s")
+end
+
+local function stationReady(key)
+    local st = stations[key]
+    return running() and state[key] and st.cframe ~= nil
 end
 
 ------------------------------------------------------------------------
@@ -163,20 +277,36 @@ local function scanPads()
     return pads
 end
 
-local function standPosition(part)
-    return part.Position + Vector3.new(0, part.Size.Y / 2 + CONFIG.TrickOrTreat.HeightOffset, 0)
-end
-
 local failedUntil = {}
 local visited = 0
+local announced = false
+
+-- Nächstgelegene bereite Fläche (oder nil) + Anzahl gefundener Flächen
+local function nextReadyPad(hrp)
+    local all = scanPads()
+    if CONFIG.TrickOrTreat.Debug and not announced then
+        log(#all .. " Trick-or-Treat-Flächen gefunden")
+        for _, pad in ipairs(all) do log("  " .. pad.part:GetFullName()) end
+        announced = true
+    end
+
+    local now = os.clock()
+    local best, bestDist = nil, math.huge
+    for _, pad in ipairs(all) do
+        if (failedUntil[pad.gui] or 0) < now and (guiState(pad.gui)) then
+            local dist = (pad.part.Position - hrp.Position).Magnitude
+            if dist < bestDist then best, bestDist = pad, dist end
+        end
+    end
+    return best, #all
+end
 
 local function visitPad(pad, hrp)
     local cfg = CONFIG.TrickOrTreat
-    local target = standPosition(pad.part)
+    local target = pad.part.Position + Vector3.new(0, pad.part.Size.Y / 2 + cfg.HeightOffset, 0)
     local radius = math.max(math.min(pad.part.Size.X, pad.part.Size.Z) / 2, 2)
 
-    hrp.CFrame = CFrame.new(target)
-    hrp.AssemblyLinearVelocity = Vector3.zero
+    teleport(hrp, CFrame.new(target))
 
     local start = os.clock()
     while totActive() and hrp.Parent do
@@ -198,169 +328,60 @@ local function visitPad(pad, hrp)
         -- Auf der Fläche bleiben, falls man runterfällt oder weggeschoben wird
         local offset = hrp.Position - target
         if Vector3.new(offset.X, 0, offset.Z).Magnitude > radius then
-            hrp.CFrame = CFrame.new(target)
-            hrp.AssemblyLinearVelocity = Vector3.zero
+            teleport(hrp, CFrame.new(target))
         end
         task.wait(0.2)
     end
 end
 
-local function trickOrTreatLoop()
-    local cfg = CONFIG.TrickOrTreat
-    local announced = false
-    while running() do
-        if not state.TrickOrTreat then
-            ui.setStatus("TrickOrTreat", "Aus | Besucht: " .. visited)
-            task.wait(0.3)
-            continue
-        end
+------------------------------------------------------------------------
+-- Hauptschleife: ein Charakter, eine Aufgabe nach der anderen
+------------------------------------------------------------------------
 
-        local char = player.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-        if not hrp or not humanoid or humanoid.Health <= 0 then
-            ui.setStatus("TrickOrTreat", "Warte auf Charakter...")
+local function mainLoop()
+    while running() do
+        local hrp = getRoot()
+        if not hrp then
             task.wait(1)
             continue
         end
 
-        local all = scanPads()
-        if cfg.Debug and not announced then
-            log(#all .. " Trick-or-Treat-Flächen gefunden")
-            for _, pad in ipairs(all) do log("  " .. pad.part:GetFullName()) end
-            announced = true
-        end
-
-        -- Nur bereite Flächen, die nicht gerade gesperrt sind
+        -- 1) Fällige Station (Chest / Ei)?
         local now = os.clock()
-        local ready = {}
-        for _, pad in ipairs(all) do
-            if (failedUntil[pad.gui] or 0) < now and (guiState(pad.gui)) then
-                table.insert(ready, pad)
+        local didStation = false
+        for _, cfg in ipairs(CONFIG.Stations) do
+            if stationReady(cfg.Key) and now - stations[cfg.Key].last >= cfg.Interval then
+                visitStation(cfg.Key, hrp)
+                didStation = true
+                break
             end
         end
+        if didStation then continue end
 
-        if #ready == 0 then
-            ui.setStatus("TrickOrTreat", string.format("0/%d bereit, warte | Besucht: %d", #all, visited))
-            task.wait(cfg.ScanDelay)
-            continue
-        end
-
-        -- Nächstgelegene zuerst -> kurze Wege durch die ganze Zone
-        table.sort(ready, function(a, b)
-            return (a.part.Position - hrp.Position).Magnitude < (b.part.Position - hrp.Position).Magnitude
-        end)
-        visitPad(ready[1], hrp)
-    end
-end
-
-------------------------------------------------------------------------
--- Auto-Hatch
-------------------------------------------------------------------------
-
-local function resolveRemote(path)
-    local current = ReplicatedStorage
-    for _, name in ipairs(path) do
-        current = current:WaitForChild(name, 10)
-        if not current then
-            return nil, "nicht gefunden: " .. name
-        end
-    end
-    return current
-end
-
--- Sucht den ProximityPrompt (E-Taste) eines Eies / einer Chest
-local function findPrompt(targetName)
-    local lowerTarget = string.lower(targetName)
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        local ok, match = pcall(function()
-            if obj:IsA("ProximityPrompt") then
-                local haystack = string.lower(obj.ObjectText .. " " .. obj.ActionText .. " " .. obj:GetFullName())
-                return string.find(haystack, lowerTarget, 1, true) ~= nil
-            end
-        end)
-        if ok and match then
-            return obj
-        end
-    end
-end
-
--- Liefert eine Funktion fire(target) oder nil + Fehlermeldung
-local function buildFire()
-    local cfg = CONFIG.Hatch
-    if cfg.Mode == "Prompt" then
-        if typeof(fireproximityprompt) ~= "function" then
-            return nil, "fireproximityprompt fehlt"
-        end
-        local prompts = {}
-        return function(target)
-            local prompt = prompts[target]
-            if not prompt or not prompt.Parent then
-                prompt = findPrompt(target)
-                prompts[target] = prompt
-            end
-            if not prompt then error("kein ProximityPrompt für " .. target) end
-            fireproximityprompt(prompt)
-        end
-    end
-
-    local remote, err = resolveRemote(cfg.RemotePath)
-    if not remote then
-        return nil, "Remote " .. err
-    end
-    local isFunction = remote:IsA("RemoteFunction")
-    if not (isFunction or remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent")) then
-        return nil, remote.Name .. " ist kein Remote"
-    end
-    log("Auto-Hatch über " .. remote:GetFullName())
-    return function(target)
-        if isFunction then
-            return remote:InvokeServer(target, table.unpack(cfg.ExtraArgs))
-        end
-        remote:FireServer(target, table.unpack(cfg.ExtraArgs))
-    end
-end
-
-local function hatchLoop()
-    local cfg = CONFIG.Hatch
-    local fire
-    local count = 0
-
-    while running() do
-        if not state.Hatch then
-            ui.setStatus("Hatch", "Aus | Gesendet: " .. count)
-            task.wait(0.3)
-            continue
-        end
-
-        if not fire then
-            ui.setStatus("Hatch", "Suche Remote/Prompt...")
-            local err
-            fire, err = buildFire()
-            if not fire then
-                warn("[HalloweenFarm] " .. err)
-                state.Hatch = false
-                ui.refresh()
-                ui.setStatus("Hatch", "Fehler: " .. err)
-                task.wait(3)
+        -- 2) Bereites Haus?
+        if state.TrickOrTreat then
+            local pad, total = nextReadyPad(hrp)
+            if pad then
+                visitPad(pad, hrp)
                 continue
             end
+            ui.setStatus("TrickOrTreat", string.format("0/%d bereit, warte | Besucht: %d", total, visited))
+        else
+            ui.setStatus("TrickOrTreat", "Aus | Besucht: " .. visited)
         end
 
-        for _, target in ipairs(cfg.Targets) do
-            if not (running() and state.Hatch) then break end
-            local ok, result = pcall(fire, target)
-            if ok then
-                count += 1
-                ui.setStatus("Hatch", target .. " | Gesendet: " .. count)
-                if cfg.Verbose then
-                    log("Hatch gesendet: " .. target .. (result ~= nil and (" -> " .. tostring(result)) or ""))
-                end
-            else
-                warn("[HalloweenFarm] Hatch-Fehler (" .. target .. "): " .. tostring(result))
-                ui.setStatus("Hatch", "Fehler bei " .. target)
+        -- 3) Nichts zu tun: Wartezeit an einer Station verbringen
+        local idleStation
+        for _, cfg in ipairs(CONFIG.Stations) do
+            if cfg.WhenIdle and stationReady(cfg.Key) then
+                idleStation = cfg.Key
+                break
             end
-            task.wait(cfg.Interval)
+        end
+        if idleStation then
+            visitStation(idleStation, hrp)
+        else
+            task.wait(CONFIG.TrickOrTreat.ScanDelay)
         end
     end
 end
@@ -401,9 +422,15 @@ local function buildGui()
         if pcall(function() screen.Parent = parent end) and screen.Parent then break end
     end
 
+    local rows = { { key = "TrickOrTreat", label = "Trick or Treat" } }
+    for _, cfg in ipairs(CONFIG.Stations) do
+        table.insert(rows, { key = cfg.Key, label = cfg.Label, station = true })
+    end
+
+    local ROW_HEIGHT = 62
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.fromOffset(250, 196)
-    frame.Position = UDim2.new(0, 20, 0.35, 0)
+    frame.Size = UDim2.fromOffset(270, 36 + #rows * ROW_HEIGHT + 22)
+    frame.Position = UDim2.new(0, 20, 0.3, 0)
     frame.BackgroundColor3 = Color3.fromRGB(28, 24, 36)
     frame.BorderSizePixel = 0
     frame.Parent = screen
@@ -433,19 +460,20 @@ local function buildGui()
     close.Parent = frame
     Instance.new("UICorner", close).CornerRadius = UDim.new(0, 6)
 
-    local buttons, statusLabels = {}, {}
+    local buttons, posButtons, statusLabels = {}, {}, {}
 
-    local function makeRow(key, label, y)
+    for index, row in ipairs(rows) do
+        local y = 36 + (index - 1) * ROW_HEIGHT
+
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, -20, 0, 34)
+        btn.Size = row.station and UDim2.new(1, -78, 0, 34) or UDim2.new(1, -20, 0, 34)
         btn.Position = UDim2.fromOffset(10, y)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 14
+        btn.TextSize = 13
         btn.TextColor3 = Color3.new(1, 1, 1)
-        btn.AutoButtonColor = true
         btn.Parent = frame
         Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-        buttons[key] = { button = btn, label = label }
+        buttons[row.key] = { button = btn, label = row.label }
 
         local status = Instance.new("TextLabel")
         status.Size = UDim2.new(1, -20, 0, 18)
@@ -458,26 +486,52 @@ local function buildGui()
         status.TextTruncate = Enum.TextTruncate.AtEnd
         status.Text = "-"
         status.Parent = frame
-        statusLabels[key] = status
+        statusLabels[row.key] = status
 
         table.insert(connections, btn.MouseButton1Click:Connect(function()
-            state[key] = not state[key]
+            if row.station and not stations[row.key].cframe then
+                status.Text = "Erst neben " .. row.label .. " stellen und 'Pos' drücken"
+                return
+            end
+            state[row.key] = not state[row.key]
+            if row.station and state[row.key] then
+                stations[row.key].last = -math.huge -- sofort einmal hingehen
+            end
             ui.refresh()
         end))
-    end
 
-    makeRow("TrickOrTreat", "Trick or Treat", 36)
-    makeRow("Hatch", "Auto-Hatch", 98)
+        if row.station then
+            local pos = Instance.new("TextButton")
+            pos.Size = UDim2.fromOffset(58, 34)
+            pos.Position = UDim2.new(1, -66, 0, y)
+            pos.BackgroundColor3 = Color3.fromRGB(46, 120, 200)
+            pos.Font = Enum.Font.GothamBold
+            pos.TextSize = 12
+            pos.TextColor3 = Color3.new(1, 1, 1)
+            pos.Parent = frame
+            Instance.new("UICorner", pos).CornerRadius = UDim.new(0, 8)
+            posButtons[row.key] = pos
+
+            table.insert(connections, pos.MouseButton1Click:Connect(function()
+                local hrp = getRoot()
+                if not hrp then return end
+                stations[row.key].cframe = hrp.CFrame
+                savePositions()
+                status.Text = "Position gespeichert"
+                ui.refresh()
+            end))
+        end
+    end
 
     local hint = Instance.new("TextLabel")
     hint.Size = UDim2.new(1, -20, 0, 16)
-    hint.Position = UDim2.fromOffset(10, 172)
+    hint.Position = UDim2.new(0, 10, 1, -20)
     hint.BackgroundTransparency = 1
     hint.Font = Enum.Font.Gotham
     hint.TextSize = 11
     hint.TextColor3 = Color3.fromRGB(130, 125, 145)
     hint.TextXAlignment = Enum.TextXAlignment.Left
-    hint.Text = CONFIG.ToggleGuiKey.Name .. " = ein-/ausblenden"
+    hint.Text = CONFIG.ToggleGuiKey.Name .. " = ein-/ausblenden | Pos = Standort speichern"
     hint.Parent = frame
 
     ui.refresh = function()
@@ -486,12 +540,18 @@ local function buildGui()
             entry.button.Text = entry.label .. (on and ":  AN" or ":  AUS")
             entry.button.BackgroundColor3 = on and Color3.fromRGB(46, 160, 67) or Color3.fromRGB(170, 50, 50)
         end
+        for key, pos in pairs(posButtons) do
+            pos.Text = stations[key].cframe and "Pos ok" or "Pos"
+        end
     end
     ui.setStatus = function(key, text)
         local lbl = statusLabels[key]
         if lbl and lbl.Parent then lbl.Text = text end
     end
     ui.refresh()
+    for key, st in pairs(stations) do
+        ui.setStatus(key, st.cframe and "Position geladen" or "Keine Position – 'Pos' drücken")
+    end
 
     -- Fenster an der Titelleiste verschieben (Maus + Touch)
     local dragging, dragStart, startPos
@@ -537,7 +597,7 @@ end
 -- Start
 ------------------------------------------------------------------------
 
+loadPositions()
 buildGui()
-task.spawn(hatchLoop)
-task.spawn(trickOrTreatLoop)
+task.spawn(mainLoop)
 log("gestartet")
