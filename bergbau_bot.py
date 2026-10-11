@@ -13,9 +13,9 @@ Ablauf pro Runde
        - nichts passiert      -> knapp daneben, leicht versetzt nochmal versuchen.
   4. Fels bricht -> gewonnen. Der Bot wartet auf die nächste Runde.
 
-Wo die Hacke "trifft" (Trefferpunkt relativ zum Stiel), wird bei jedem erfolgreichen Schlag
-nachgelernt. Falls es trotzdem nicht klappt: Hacke von Hand genau auf einen Punkt stellen und
-F8 drücken - der Versatz wird in bergbau_kalibrierung.json gespeichert.
+Wo die Hacke "trifft" (Trefferpunkt relativ zum Stiel), wird nachgelernt, wenn erst ein leicht
+versetzter Schlag wirkt. Falls es trotzdem nicht klappt: Hacke von Hand genau auf einen Punkt
+stellen und F8 drücken - der Versatz wird in bergbau_kalibrierung.json gespeichert.
 
 Hotkeys:  F8 = Kalibrieren   F9 = Pause/Weiter   F10 = Beenden
 
