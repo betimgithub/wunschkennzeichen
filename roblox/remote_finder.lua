@@ -10,6 +10,17 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+-- Alle Zeilen werden gesammelt und am Ende in einem Fenster angezeigt,
+-- weil manche Executors print() nicht in die F9-Konsole schreiben.
+local lines = {}
+local rawPrint = print
+local function print(text)
+    table.insert(lines, text)
+    rawPrint(text)
+end
+print("Remote Finder gestartet")
 
 -- Suchwörter (Groß-/Kleinschreibung egal). Bei Bedarf erweitern.
 local KEYWORDS = {
@@ -34,7 +45,7 @@ end
 local function safeDescendants(root)
     local ok, list = pcall(function() return root:GetDescendants() end)
     if ok then return list end
-    warn("[RemoteFinder] GetDescendants fehlgeschlagen für " .. tostring(root) .. ": " .. tostring(list))
+    print("[RemoteFinder] GetDescendants fehlgeschlagen für " .. tostring(root) .. ": " .. tostring(list))
     return {}
 end
 
@@ -89,3 +100,94 @@ print(string.format("========== %d Prompts ==========", prompts))
 if skipped > 0 then
     print(string.format("(%d gesperrte Objekte übersprungen – normal, kein Problem)", skipped))
 end
+
+------------------------------------------------------------------------
+-- Ergebnis-Fenster (mit Kopieren-Knopf)
+------------------------------------------------------------------------
+local result = table.concat(lines, "\n")
+
+local parent
+if typeof(gethui) == "function" then pcall(function() parent = gethui() end) end
+if not parent then pcall(function() parent = game:GetService("CoreGui") end) end
+
+local screen = Instance.new("ScreenGui")
+screen.Name = "RemoteFinderGui"
+screen.ResetOnSpawn = false
+screen.DisplayOrder = 1000
+if not (parent and pcall(function() screen.Parent = parent end) and screen.Parent) then
+    screen.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0.6, 0, 0.6, 0)
+frame.Position = UDim2.new(0.2, 0, 0.2, 0)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+frame.BorderSizePixel = 0
+frame.Parent = screen
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+local function button(text, xOffset, color)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(110, 26)
+    b.Position = UDim2.new(1, xOffset, 0, 6)
+    b.BackgroundColor3 = color
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.Text = text
+    b.Parent = frame
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    return b
+end
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -250, 0, 38)
+title.Position = UDim2.fromOffset(10, 0)
+title.BackgroundTransparency = 1
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Font = Enum.Font.GothamBold
+title.TextSize = 15
+title.TextColor3 = Color3.fromRGB(255, 160, 40)
+title.Text = "Remote Finder – Ergebnis"
+title.Parent = frame
+
+local copy = button("Kopieren", -236, Color3.fromRGB(46, 120, 200))
+local close = button("Schließen", -120, Color3.fromRGB(170, 50, 50))
+
+local scroll = Instance.new("ScrollingFrame")
+scroll.Size = UDim2.new(1, -20, 1, -48)
+scroll.Position = UDim2.fromOffset(10, 40)
+scroll.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 8
+scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scroll.CanvasSize = UDim2.new()
+scroll.Parent = frame
+
+local box = Instance.new("TextBox")
+box.Size = UDim2.new(1, -12, 0, 0)
+box.AutomaticSize = Enum.AutomaticSize.Y
+box.BackgroundTransparency = 1
+box.ClearTextOnFocus = false
+box.TextEditable = false
+box.MultiLine = true
+box.TextWrapped = true
+box.TextXAlignment = Enum.TextXAlignment.Left
+box.TextYAlignment = Enum.TextYAlignment.Top
+box.Font = Enum.Font.Code
+box.TextSize = 13
+box.TextColor3 = Color3.fromRGB(220, 220, 220)
+box.Text = result
+box.Parent = scroll
+
+copy.MouseButton1Click:Connect(function()
+    if typeof(setclipboard) == "function" then
+        setclipboard(result)
+        copy.Text = "Kopiert!"
+    else
+        copy.Text = "nicht verfügbar"
+    end
+end)
+close.MouseButton1Click:Connect(function()
+    screen:Destroy()
+end)
