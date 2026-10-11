@@ -90,11 +90,15 @@ local function totActive()
     return running() and state.TrickOrTreat
 end
 
+-- pcall: gesperrte Objekte ("property is locked") einfach überspringen
 local function textOf(obj)
-    if obj:IsA("TextLabel") or obj:IsA("TextButton") then
-        local t = obj.ContentText ~= "" and obj.ContentText or obj.Text
-        return string.lower(t)
-    end
+    local ok, t = pcall(function()
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+            local text = obj.ContentText ~= "" and obj.ContentText or obj.Text
+            return obj.Visible and string.lower(text) or nil
+        end
+    end)
+    return ok and t or nil
 end
 
 -- Liest alle sichtbaren Texte eines BillboardGuis aus
@@ -105,7 +109,7 @@ local function guiState(gui)
     end
     for _, obj in ipairs(gui:GetDescendants()) do
         local t = textOf(obj)
-        if t and obj.Visible then
+        if t then
             if string.find(t, CONFIG.TrickOrTreat.ReadyText, 1, true) then ready = true end
             if string.find(t, CONFIG.TrickOrTreat.CooldownText, 1, true) then cooldown = true end
         end
@@ -139,7 +143,8 @@ local function scanPads()
     local pads, seen = {}, {}
     local roots = { workspace, player:FindFirstChildOfClass("PlayerGui") }
     for _, root in ipairs(roots) do
-        for _, obj in ipairs(root:GetDescendants()) do
+        local ok, descendants = pcall(function() return root:GetDescendants() end)
+        for _, obj in ipairs(ok and descendants or {}) do
             local t = textOf(obj)
             if t and (string.find(t, CONFIG.TrickOrTreat.ReadyText, 1, true)
                 or string.find(t, CONFIG.TrickOrTreat.CooldownText, 1, true)) then
@@ -268,11 +273,14 @@ end
 local function findPrompt(targetName)
     local lowerTarget = string.lower(targetName)
     for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") then
-            local haystack = string.lower(obj.ObjectText .. " " .. obj.ActionText .. " " .. obj:GetFullName())
-            if string.find(haystack, lowerTarget, 1, true) then
-                return obj
+        local ok, match = pcall(function()
+            if obj:IsA("ProximityPrompt") then
+                local haystack = string.lower(obj.ObjectText .. " " .. obj.ActionText .. " " .. obj:GetFullName())
+                return string.find(haystack, lowerTarget, 1, true) ~= nil
             end
+        end)
+        if ok and match then
+            return obj
         end
     end
 end
