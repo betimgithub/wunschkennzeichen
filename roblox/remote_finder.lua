@@ -8,7 +8,10 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Suchwörter (Groß-/Kleinschreibung egal). Bei Bedarf erweitern.
-local KEYWORDS = { "egg", "hatch", "buy", "open" }
+local KEYWORDS = {
+    "egg", "hatch", "buy", "open",
+    "chest", "creaking", "halloween", "treat", "candy", "knock",
+}
 
 -- true = ALLE Remotes ausgeben, ohne Filter (hilfreich, wenn die
 -- Remotes kryptische Namen haben)
@@ -38,3 +41,18 @@ for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
 end
 
 print(string.format("========== %d Treffer ==========", found))
+
+-- ProximityPrompts (E-Taste) im Workspace – zeigt, wie das Ei geöffnet wird
+print("========== ProximityPrompts im Workspace ==========")
+local prompts = 0
+for _, obj in ipairs(workspace:GetDescendants()) do
+    if obj:IsA("ProximityPrompt") then
+        local info = obj.ObjectText .. " " .. obj.ActionText
+        if SHOW_ALL or matchesKeyword(info) or matchesKeyword(obj:GetFullName()) then
+            prompts += 1
+            print(string.format("[Prompt] %s | ObjectText=%q ActionText=%q",
+                obj:GetFullName(), obj.ObjectText, obj.ActionText))
+        end
+    end
+end
+print(string.format("========== %d Prompts ==========", prompts))
