@@ -20,9 +20,7 @@ local MAX_ENTRIES = 150
 
 ------------------------------------------------------------------------
 
-if typeof(hookmetamethod) ~= "function" or typeof(getnamecallmethod) ~= "function" then
-    error("Dein Executor unterstützt hookmetamethod/getnamecallmethod nicht – Remote Spy nicht möglich")
-end
+local canHook = typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function"
 local wrap = typeof(newcclosure) == "function" and newcclosure or function(f) return f end
 local isOwnCall = typeof(checkcaller) == "function" and checkcaller or function() return false end
 
@@ -84,15 +82,6 @@ local function logCall(remote, method, args)
     refresh()
 end
 
-local oldNamecall
-oldNamecall = hookmetamethod(game, "__namecall", wrap(function(self, ...)
-    local method = getnamecallmethod()
-    if (method == "FireServer" or method == "InvokeServer") and not isOwnCall() then
-        local args = table.pack(...)
-        task.spawn(logCall, self, method, args)
-    end
-    return oldNamecall(self, ...)
-end))
 
 ------------------------------------------------------------------------
 -- Fenster
@@ -235,3 +224,62 @@ UserInputService.InputChanged:Connect(function(input)
         frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
     end
 end)
+
+------------------------------------------------------------------------
+-- Start: Hook setzen oder (falls nicht möglich) Diagnose anzeigen
+------------------------------------------------------------------------
+
+local executor = "unbekannt"
+if typeof(identifyexecutor) == "function" then
+    pcall(function() executor = table.concat({ identifyexecutor() }, " ") end)
+end
+
+local function allRemotes()
+    local out = {}
+    local ok, list = pcall(function() return game:GetService("ReplicatedStorage"):GetDescendants() end)
+    for _, obj in ipairs(ok and list or {}) do
+        pcall(function()
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("UnreliableRemoteEvent") then
+                table.insert(out, "[" .. obj.ClassName .. "] " .. obj:GetFullName())
+            end
+        end)
+    end
+    return out
+end
+
+local hookOk, hookErr = false, "hookmetamethod fehlt"
+if canHook then
+    hookOk, hookErr = pcall(function()
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+            local method = getnamecallmethod()
+            if (method == "FireServer" or method == "InvokeServer") and not isOwnCall() then
+                local args = table.pack(...)
+                task.spawn(logCall, self, method, args)
+            end
+            return oldNamecall(self, ...)
+        end))
+    end)
+end
+
+if hookOk then
+    title.Text = "Remote Spy aktiv – drück jetzt E am Ei"
+    box.Text = "(noch keine Aufrufe)\nExecutor: " .. executor
+else
+    -- Kein Abfangen möglich: wenigstens alle Remotes ungefiltert zeigen
+    title.Text = "Spy nicht möglich – Diagnose"
+    local remotes = allRemotes()
+    local diag = {
+        "Executor: " .. executor,
+        "hookmetamethod: " .. tostring(typeof(hookmetamethod) == "function"),
+        "getnamecallmethod: " .. tostring(typeof(getnamecallmethod) == "function"),
+        "Fehler: " .. tostring(hookErr),
+        "",
+        "Alle Remotes in ReplicatedStorage (" .. #remotes .. "):",
+    }
+    for _, r in ipairs(remotes) do table.insert(diag, r) end
+    for _, line in ipairs(diag) do
+        table.insert(entries, { line = line, count = 1 })
+    end
+    refresh()
+end
