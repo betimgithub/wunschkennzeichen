@@ -65,7 +65,7 @@ CELL_MIN_W = 14
 QTE_KEY_HOLD = 0.05
 QTE_GAP = 0.10           # Pause zwischen zwei Buchstaben
 
-AFTER_QTE = 2.5          # nach dem Buchstaben-Spiel so lange warten, dann R
+AFTER_QTE = 3.0          # nach dem Buchstaben-Spiel so lange warten, dann R (vorher nimmt das Spiel R nicht an)
 R_PRESSES = 2            # so oft R drücken (Fisch aufheben) ...
 R_GAP = 1.0              # ... mit so viel Abstand dazwischen
 R_HOLD = 0.12            # so lange wird R gehalten (Sekunden)
