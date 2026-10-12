@@ -65,8 +65,11 @@ CELL_MIN_W = 14
 QTE_KEY_HOLD = 0.05
 QTE_GAP = 0.10           # Pause zwischen zwei Buchstaben
 
-AFTER_QTE = 1.5          # nach dem Buchstaben-Spiel so lange warten, dann R
-AFTER_R = 1.0            # nach R so lange warten, dann LEERTASTE (neu auswerfen)
+AFTER_QTE = 2.5          # nach dem Buchstaben-Spiel so lange warten, dann R
+R_PRESSES = 2            # so oft R drücken (Fisch aufheben) ...
+R_GAP = 1.0              # ... mit so viel Abstand dazwischen
+R_HOLD = 0.12            # so lange wird R gehalten (Sekunden)
+AFTER_R = 1.0            # nach dem letzten R so lange warten, dann LEERTASTE (neu auswerfen)
 BITE_COOLDOWN = 2.5      # nach dem Biss-Druck so lange keinen weiteren Biss-Druck
 AUTO_RECAST = True       # neu auswerfen, wenn länger nichts zu sehen ist (z. B. Fisch verloren)
 RECAST_AFTER = 10.0      # ... nach so vielen Sekunden ohne Meldung oben
@@ -633,8 +636,11 @@ class Bot:
         self.qte_done_at = time.time()
         self.last_activity = time.time()
         self.ctl.sleep(AFTER_QTE)
-        self.keys.tap("r")
-        log("  R gedrückt (Fisch aufheben).")
+        for i in range(R_PRESSES):                  # R (pynput) - mehrmals, falls einer verschluckt wird
+            if i:
+                self.ctl.sleep(R_GAP)
+            self.keys.tap("r", hold=R_HOLD)
+            log(f"  R gedrückt (Fisch aufheben) {i + 1}/{R_PRESSES}.")
         self.ctl.sleep(AFTER_R)
         self.keys.tap("space")
         log("  LEERTASTE - neu ausgeworfen.")
