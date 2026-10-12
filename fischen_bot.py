@@ -53,8 +53,8 @@ BITE_MIN_REL = 0.30      # "SPACE" liegt beim Biss mittig im Text (~0,5), beim B
 BLUE_HUE = (92, 114)
 BLUE_MIN_SAT, BLUE_MIN_VAL = 100, 140
 WHITE_MAX_SAT, WHITE_MIN_VAL = 45, 225
-BAR_PRESS_FROM = 0.30    # drücken zwischen Markierung + 30 % des blauen Bereichs ...
-BAR_PRESS_END = 0.10     # ... und 10 % vor 100 % - bevorzugt, während der Balken wächst
+BAR_PRESS_FROM = 0.20    # der Balken soll zwischen Markierung + 20 % des blauen Bereichs ...
+BAR_PRESS_END = 0.08     # ... und 8 % vor 100 % stehen bleiben
 PRESS_LATENCY = 0.045    # Sekunden von "Taste drücken" bis das Spiel sie verarbeitet (Vorhalt)
 BAR_TIMEOUT = 12.0       # länger dauert das Balken-Spiel nie
 
@@ -468,6 +468,7 @@ class Bot:
         self.last_activity = time.time()
         self.qte_done_at = 0.0
         self.latency = PRESS_LATENCY
+        self.bar_speed = None           # Tempo des Balkens (px/s), über die Runden gemerkt
         try:
             with open(CALIB_FILE, encoding="utf-8") as f:
                 self.latency = float(json.load(f)["latency"])
@@ -485,18 +486,15 @@ class Bot:
     # ------------------------------------------------------------------ bar
     def play_bar(self, game_img, bar):
         """Weiße Markierung = Grenze (steht still). Blauer Balken läuft darüber hinaus bis 100 %
-        und wieder zurück. LEERTASTE, wenn der Balken (vorausberechnet) gut im blauen Bereich ist."""
+        und wieder zurück. LEERTASTE schon beim ersten Durchgang, sobald der Balken - mit
+        Vorhalt für die Reaktionszeit - im blauen Bereich landen wird."""
         y1, y2, x1, x2 = bar
         gx, gy = self.game_rect[:2]
         rect = (gx + x1, gy + y1, x2 - x1, y2 - y1)
-        log("Balken-Spiel erkannt - warte, bis der Balken über die Markierung läuft.")
+        log("Balken-Spiel erkannt.")
         self.save_debug("balken_start", game_img)
         marker, end = None, None
-        last, vel, dt = None, 0.0, 0.02
-        speed = None                    # gemerkte Balken-Geschwindigkeit (px/s)
-        turns = 0                       # wie oft der Balken schon bei 100 % umgedreht hat
-        start, span = None, None        # 0 %-Ende links, Breite des blauen Bereichs
-        t_press = None                  # vorausberechneter Druckzeitpunkt (sehr schneller Balken)
+        last, vel = None, 0.0
         t0 = time.time()
         t_log = 0.0
         missing = 0
@@ -505,7 +503,7 @@ class Bot:
             ta = time.time()
             band = cv2.cvtColor(self.screen.grab(rect), cv2.COLOR_BGR2HSV)
             now = (ta + time.time()) / 2   # Aufnahmezeitpunkt ~ Mitte des Abgreifens
-            m, fill, bar_end, bar_start = read_bar(band)
+            m, fill, bar_end, _ = read_bar(band)
             if m is None:
                 missing += 1
                 if missing >= 15:
@@ -516,99 +514,94 @@ class Bot:
             marker = m if marker is None else 0.8 * marker + 0.2 * m
             if bar_end is not None:
                 end = bar_end if end is None else max(end, bar_end)
-            if bar_start is not None:
-                start = bar_start if start is None else min(start, bar_start)
             if self.debug_on and now - t_log > 0.25:
                 t_log = now
                 log(f"  [Balken] Markierung x={marker:.0f}  Balken bis "
                     f"{'-' if fill is None else f'{fill:.0f}'}  100 % bei {'-' if end is None else f'{end:.0f}'}")
             if fill is None or end is None or end - marker < 5:
-                # Balken im roten Bereich. Ist er gerade dort hinein zurückgelaufen und ist er
-                # zu schnell zum Nachschauen, wird der nächste Durchgang vorausberechnet:
-                # bis 0 % und zurück zur Markierung, dann bis zur Mitte des blauen Bereichs.
-                if last is not None and vel < 0 and speed and start is not None and span:
-                    t_exit = last[0] + (last[1] - marker) / speed
-                    fast = (1 - BAR_PRESS_FROM - BAR_PRESS_END) * span / speed < 3 * dt
-                    if fast:
-                        t_press = (t_exit + 2 * (marker - start) / speed
-                                   + 0.5 * span / speed - self.latency)
-                last, vel = None, 0.0
-                if t_press is not None and time.time() >= t_press - dt / 2:
-                    wait = t_press - time.time()
-                    if wait > 0:
-                        time.sleep(wait)
-                    self.keys.tap("space", hold=0.03)
-                    log("  LEERTASTE vorausberechnet (sehr schneller Balken).")
-                    self.last_activity = time.time()
-                    self.learn_latency(rect, marker + 0.5 * span, speed, marker, span)
-                    self.save_debug("balken_gedrueckt", self.screen.grab(self.game_rect))
-                    return
+                last, vel = None, 0.0          # Balken noch im roten Bereich
                 continue
-            t_press = None
             if last is None:
-                # Balken kommt gerade aus dem roten Bereich -> er wächst
-                vel = speed or 0.0
+                # Balken kommt gerade aus dem roten Bereich -> er wächst. Tempo aus früheren Runden.
+                vel = self.bar_speed or 0.0
             elif now > last[0]:
-                dt = 0.7 * dt + 0.3 * (now - last[0])
                 v = (fill - last[1]) / (now - last[0])
                 if abs(v) > 1:
-                    turned = v * vel < 0
-                    if turned and vel > 0:
-                        turns += 1             # Umkehr bei 100 %
-                    if not turned:             # über eine Umkehr gemessen wäre das Tempo zu klein
-                        speed = abs(v) if speed is None else 0.7 * speed + 0.3 * abs(v)
-                    # Richtung aus der Messung, Tempo aus dem Mittel (stabiler)
-                    vel = float(np.copysign(speed if speed else abs(v), v))
+                    if v * vel > 0 or vel == 0:   # nicht über die Umkehr bei 100 % hinweg messen
+                        self.bar_speed = abs(v) if not self.bar_speed else 0.6 * self.bar_speed + 0.4 * abs(v)
+                    vel = float(np.copysign(self.bar_speed or abs(v), v))
             last = (now, fill)
             if vel == 0:
                 continue
             span = end - marker
-            if speed and (1 - BAR_PRESS_FROM - BAR_PRESS_END) * span / speed < 3 * dt and start is not None:
-                continue                       # zu schnell zum Nachschauen -> vorausberechnen (s. o.)
             lo = marker + BAR_PRESS_FROM * span
             hi = end - BAR_PRESS_END * span
             # wo ist der Balken, wenn das Spiel den Tastendruck verarbeitet?
-            ahead = fill + vel * (time.time() - now + self.latency)
-            # beim Wachsen drücken; erst nach 2 Umkehrungen (Zeit wird knapp) auch beim Zurücklaufen
-            if lo <= ahead <= hi and (vel > 0 or turns >= 2):
+            at_press = fill + vel * (time.time() - now)   # Stelle beim Drücken
+            ahead_u = at_press + vel * self.latency
+            ahead = 2 * end - ahead_u if ahead_u > end else ahead_u   # prallt bei 100 % ab
+            if lo <= ahead <= hi:
                 self.keys.tap("space", hold=0.03)
-                log(f"  LEERTASTE - Balken bei {(ahead - marker) / span * 100:.0f} % des blauen Bereichs.")
+                log(f"  LEERTASTE - Balken landet bei ca. {(ahead - marker) / span * 100:.0f} % "
+                    f"des blauen Bereichs ({time.time() - t0:.2f} s nach Erkennen).")
                 self.last_activity = time.time()
-                self.learn_latency(rect, ahead, vel, marker, span)
+                self.learn_latency(rect, at_press, vel, marker, end)
                 self.save_debug("balken_gedrueckt", self.screen.grab(self.game_rect))
                 return
         log("Balken-Spiel: Zeit abgelaufen.")
 
-    def learn_latency(self, rect, ahead, vel, marker, span):
-        """Wo ist der Balken stehen geblieben? Daraus die Reaktionszeit des Spiels nachlernen."""
+    def learn_latency(self, rect, at_press, vel, marker, end):
+        """Wo ist der Balken stehen geblieben? Daraus die Reaktionszeit des Spiels nachlernen.
+        at_press = Stelle des Balkens beim Drücken, vel = Tempo (px/s, + = wächst)."""
+        span = end - marker
         stops = []
         for _ in range(3):
             self.ctl.sleep(0.12)
             m, f, _, _ = read_bar(cv2.cvtColor(self.screen.grab(rect), cv2.COLOR_BGR2HSV))
             if m is None:
                 return                              # Balken weg -> nichts zu lernen
-            stops.append(marker - 0.5 * span if f is None else f)   # kein Blau = im Roten
+            stops.append(f)
+        if None in stops:
+            log("  Balken steht im Roten - Reaktionszeit wird erhöht.")
+            self.set_latency(self.latency + 0.02)
+            return
         if max(stops) - min(stops) > 2:
             return                                  # Balken läuft weiter -> nichts lernen
         stop = stops[-1]
-        pct = (stop - marker) / span * 100
-        log(f"  Balken steht bei {pct:.0f} % des blauen Bereichs" + (" - TREFFER" if pct > 0 else " - im Roten!"))
+        log(f"  Balken steht bei {(stop - marker) / span * 100:.0f} % des blauen Bereichs - TREFFER")
         if abs(vel) < 50:
             return
-        if stop < marker:
-            step = 0.02                              # schon umgedreht und im Roten -> Spiel reagiert später
-        else:
-            err = (stop - ahead) / vel               # > 0: Spiel reagiert später als gedacht
-            step = float(np.clip(0.6 * err, -0.02, 0.02))  # pro Runde höchstens 20 ms nachstellen
-        new = float(np.clip(self.latency + step, 0.0, 0.25))
-        if abs(new - self.latency) >= 0.003:
-            self.latency = new
-            log(f"  Reaktionszeit nachgelernt: {self.latency * 1000:.0f} ms")
-            try:
-                with open(CALIB_FILE, "w", encoding="utf-8") as f:
-                    json.dump({"latency": round(self.latency, 4)}, f)
-            except Exception:
-                pass
+        # beim Wachsen kann er schon abgeprallt sein -> zwei mögliche Wege. Gelernt wird nur,
+        # wenn genau einer zu einer plausiblen Reaktionszeit (0-250 ms) passt.
+        cands = [stop, 2 * end - stop] if vel > 0 else [stop]
+        times = [(c - at_press) / vel for c in cands]
+        ok = [t for t in times if 0.0 <= t <= 0.25]
+        if len(ok) != 1:
+            return
+        self.set_latency(self.latency + float(np.clip(0.6 * (ok[0] - self.latency), -0.02, 0.02)))
+
+    def set_latency(self, value):
+        new = float(np.clip(value, 0.0, 0.25))
+        if abs(new - self.latency) < 0.003:
+            return
+        self.latency = new
+        log(f"  Reaktionszeit nachgelernt: {self.latency * 1000:.0f} ms")
+        try:
+            with open(CALIB_FILE, "w", encoding="utf-8") as f:
+                json.dump({"latency": round(self.latency, 4)}, f)
+        except Exception:
+            pass
+
+    def wait_for_bar(self, seconds=3.0):
+        """Nach dem Biss schnell auf den Balken warten (nur Balken-Suche, sonst nichts)."""
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            game = self.screen.grab(self.game_rect)
+            bar = find_bar(cv2.cvtColor(game, cv2.COLOR_BGR2HSV))
+            if bar is not None:
+                self.play_bar(game, bar)
+                return
+            self.ctl.sleep(0.005)
 
     # ------------------------------------------------------------------ qte
     def play_qte(self, game_img):
@@ -663,17 +656,17 @@ class Bot:
                 game = self.screen.grab(self.game_rect)
                 ghsv = cv2.cvtColor(game, cv2.COLOR_BGR2HSV)
 
+                bar = find_bar(ghsv)               # Balken zuerst - da zählt jede Millisekunde
+                if bar is not None:
+                    self.play_bar(game, bar)
+                    last_state = None
+                    continue
+
                 keys, _ = read_qte(ghsv)
                 if keys and time.time() - self.qte_done_at > 3.0:
                     if self.play_qte(game):
                         last_state = None
                         continue
-
-                bar = find_bar(ghsv)
-                if bar is not None:
-                    self.play_bar(game, bar)
-                    last_state = None
-                    continue
 
                 top = cv2.cvtColor(self.screen.grab(self.top_rect), cv2.COLOR_BGR2HSV)
                 state, _ = top_text(top)
@@ -691,6 +684,7 @@ class Bot:
                     self.keys.tap("space")
                     self.last_bite = time.time()
                     bite_frames = 0
+                    self.wait_for_bar()
                     continue
 
                 if (AUTO_RECAST and state == "leer"
