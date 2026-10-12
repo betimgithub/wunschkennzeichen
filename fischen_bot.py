@@ -6,8 +6,9 @@ Ablauf
   1. "You are currently fishing ..."            -> warten.
   2. "You got a bite. Press SPACE ..."          -> LEERTASTE.
   3. Balken-Spiel ("Press SPACE before the bar fluctuates 3 times")
-       Die Markierung läuft über den Balken hin und her. Der Bot merkt sich die blaue Zone
-       und drückt LEERTASTE, sobald die Markierung (vorausberechnet) in der blauen Zone ist.
+       Die weiße Markierung (▼) ist die Grenze: links davon rot = verloren. Der blaue Balken
+       läuft darüber hinaus bis 100 % und wieder zurück. Der Bot drückt LEERTASTE, sobald der
+       Balken (vorausberechnet) sicher im blauen Bereich hinter der Markierung ist.
   4. Buchstaben-Spiel ("Press the keys displayed within the given time")
        Die Kästchen werden von links nach rechts gelesen und die Tasten W/A/S/D gedrückt.
        Erkannt wird über die Pfeile (▲=W ◄=A ▼=S ►=D), daher ist die Farbe egal;
@@ -47,11 +48,13 @@ GAME_AREA = (0.15, 0.25, 0.85, 0.95)         # Bereich für Balken und Buchstabe
 YELLOW_HUE = (15, 35)
 BITE_MIN_REL = 0.30      # "SPACE" liegt beim Biss mittig im Text (~0,5), beim Balken vorne (~0,15)
 
-# Balken: blaue Zielzone, weiße Markierung
+# Balken: weiße Markierung = Grenze (steht still), links davon rot = verloren,
+# rechts davon läuft der blaue Balken bis 100 % und wieder zurück
 BLUE_HUE = (92, 114)
 BLUE_MIN_SAT, BLUE_MIN_VAL = 100, 140
 WHITE_MAX_SAT, WHITE_MIN_VAL = 45, 225
-ZONE_MARGIN = 0.15       # so viel (Anteil der Zonenbreite) wird an beiden Rändern weggelassen
+BAR_PRESS_FROM = 0.30    # drücken zwischen Markierung + 30 % des blauen Bereichs ...
+BAR_PRESS_END = 0.10     # ... und 10 % vor 100 % - bevorzugt, während der Balken wächst
 PRESS_LATENCY = 0.045    # Sekunden von "Taste drücken" bis das Spiel sie verarbeitet (Vorhalt)
 BAR_TIMEOUT = 12.0       # länger dauert das Balken-Spiel nie
 
@@ -262,39 +265,75 @@ def red_mask(hsv):
     return ((h <= 10) | (h >= 160)) & (s >= 40) & (v >= 110)
 
 
+def dark_bar_mask(hsv):
+    """Leerer (noch nicht gefüllter) Teil des Balkens: dunkelgrau."""
+    return (hsv[..., 1] <= 80) & (hsv[..., 2] >= 30) & (hsv[..., 2] <= 95)
+
+
 def find_bar(hsv):
-    """Sucht die blaue Zone mit rotem Balkenteil bzw. weißer Markierung daneben.
-    Ergebnis: (y1, y2, x1, x2) = Zeilen des Balkens und Suchbereich in x - oder None."""
-    blue = blue_mask(hsv).astype(np.uint8)
-    n, _, st, _ = cv2.connectedComponentsWithStats(blue)
+    """Sucht den Balken: flache rote (Gefahrenbereich) oder blaue (Balken) Fläche mit der weißen
+    Grenz-Markierung in derselben Höhe. Ergebnis: (y1, y2, x1, x2) - oder None."""
+    mask = (red_mask(hsv) | blue_mask(hsv)).astype(np.uint8)
+    n, _, st, _ = cv2.connectedComponentsWithStats(mask)
     best = None
     for i in range(1, n):
         x, y, w, h, area = st[i]
-        if h < 6 or w < 0.8 * h or area < 0.6 * w * h:      # flaches, gefülltes Rechteck
+        if h < 6 or w < 2 * h or area < 0.45 * w * h:     # flaches, gefülltes Rechteck
             continue
         y1, y2 = y + int(0.15 * h), y + h - int(0.15 * h)
-        x1, x2 = max(0, x - 20 * h), min(hsv.shape[1], x + w + 20 * h)
+        x1, x2 = max(0, x - 25 * h), min(hsv.shape[1], x + w + 25 * h)
         band = hsv[y1:y2, x1:x2]
-        red = red_mask(band).mean(axis=0) > 0.5
-        marker = (white_mask(band).mean(axis=0) > 0.6).any()
-        if red.sum() < 2 * h and not marker:
+        if not (white_mask(band).mean(axis=0) > 0.6).any():
             continue
         if best is None or area > best[0]:
             best = (area, (y1, y2, x1, x2))
     return best[1] if best else None
 
 
-def read_bar(band_hsv):
-    """Blaue Spalten (Zone) und Position der weißen Markierung im Balken-Ausschnitt."""
-    blue_cols = np.nonzero(blue_mask(band_hsv).mean(axis=0) > 0.5)[0]
-    white = white_mask(band_hsv).mean(axis=0)
-    marker = None
-    if white.max() > 0.6:
-        cols = np.nonzero(white > 0.6)[0]
-        marker = float(cols.mean())
-    zone = (int(blue_cols.min()), int(blue_cols.max())) if len(blue_cols) else None
-    return zone, marker
+def red_zone_mask(hsv):
+    """Roter Bereich links der Markierung (rot oder rosa schraffiert)."""
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    return ((h <= 12) | (h >= 120)) & (s >= 15) & (v >= 90)
 
+
+def read_bar(band_hsv):
+    """(Markierung, Balkenende, 100 %-Ende, 0 %-Anfang) im Balken-Ausschnitt, jeweils x oder None.
+    Markierung = weiße Grenzlinie (steht still), Balkenende = rechtes Ende der blauen Füllung
+    hinter der Markierung, 100 %-Ende = Ende des grauen Leer-Bereichs, 0 %-Anfang = linkes Ende
+    des roten Bereichs."""
+    white = white_mask(band_hsv).mean(axis=0) > 0.6
+    if not white.any():
+        return None, None, None, None
+    cols = np.nonzero(white)[0]
+    # mehrere weiße Spalten: die zusammenhängende Gruppe mit den meisten Spalten
+    groups = np.split(cols, np.nonzero(np.diff(cols) > 2)[0] + 1)
+    grp = max(groups, key=len)
+    marker = float(grp.mean())
+    blue = blue_mask(band_hsv).mean(axis=0) > 0.5
+    dark = dark_bar_mask(band_hsv).mean(axis=0) > 0.6
+    # vom Marker nach rechts laufen, solange Balken (blau, grau oder weiß) - Lücken bis 3 px
+    x, last_blue, last_bar, gap = int(grp.max()) + 1, None, None, 0
+    while x < band_hsv.shape[1] and gap <= 3:
+        if blue[x]:
+            last_blue = last_bar = x
+            gap = 0
+        elif dark[x] or white[x]:
+            last_bar = x
+            gap = 0
+        else:
+            gap += 1
+        x += 1
+    fill = float(last_blue) if last_blue is not None else None
+    red = red_zone_mask(band_hsv).mean(axis=0) > 0.5
+    x, first, gap = int(grp.min()) - 1, None, 0
+    while x >= 0 and gap <= 3:
+        if red[x]:
+            first, gap = x, 0
+        else:
+            gap += 1
+        x -= 1
+    return (marker, fill, (float(last_bar) if last_bar is not None else None),
+            (float(first) if first is not None else None))
 
 # ============================================================================
 # Erkennung: Buchstaben-Kästchen
@@ -442,71 +481,123 @@ class Bot:
 
     # ------------------------------------------------------------------ bar
     def play_bar(self, game_img, bar):
+        """Weiße Markierung = Grenze (steht still). Blauer Balken läuft darüber hinaus bis 100 %
+        und wieder zurück. LEERTASTE, wenn der Balken (vorausberechnet) gut im blauen Bereich ist."""
         y1, y2, x1, x2 = bar
         gx, gy = self.game_rect[:2]
         rect = (gx + x1, gy + y1, x2 - x1, y2 - y1)
-        log("Balken-Spiel erkannt - warte auf die blaue Zone.")
+        log("Balken-Spiel erkannt - warte, bis der Balken über die Markierung läuft.")
         self.save_debug("balken_start", game_img)
-        zone = None
-        last = None                     # (Zeit, Markierung)
-        vel, samples = 0.0, 0
-        dt = 0.02                       # gemessene Zeit pro Bild
+        marker, end = None, None
+        last, vel, dt = None, 0.0, 0.02
+        speed = None                    # gemerkte Balken-Geschwindigkeit (px/s)
+        turns = 0                       # wie oft der Balken schon bei 100 % umgedreht hat
+        start, span = None, None        # 0 %-Ende links, Breite des blauen Bereichs
+        t_press = None                  # vorausberechneter Druckzeitpunkt (sehr schneller Balken)
         t0 = time.time()
+        t_log = 0.0
         missing = 0
         while time.time() - t0 < BAR_TIMEOUT:
             self.ctl.check()
             ta = time.time()
             band = cv2.cvtColor(self.screen.grab(rect), cv2.COLOR_BGR2HSV)
             now = (ta + time.time()) / 2   # Aufnahmezeitpunkt ~ Mitte des Abgreifens
-            z, marker = read_bar(band)
-            if z is None and marker is None:
+            m, fill, bar_end, bar_start = read_bar(band)
+            if m is None:
                 missing += 1
                 if missing >= 15:
                     log("Balken verschwunden.")
                     return
                 continue
             missing = 0
-            if z is not None:           # Zone über alle Bilder vereinen (Markierung kann sie verdecken)
-                zone = z if zone is None else (min(zone[0], z[0]), max(zone[1], z[1]))
-            if marker is None or zone is None:
+            marker = m if marker is None else 0.8 * marker + 0.2 * m
+            if bar_end is not None:
+                end = bar_end if end is None else max(end, bar_end)
+            if bar_start is not None:
+                start = bar_start if start is None else min(start, bar_start)
+            if self.debug_on and now - t_log > 0.25:
+                t_log = now
+                log(f"  [Balken] Markierung x={marker:.0f}  Balken bis "
+                    f"{'-' if fill is None else f'{fill:.0f}'}  100 % bei {'-' if end is None else f'{end:.0f}'}")
+            if fill is None or end is None or end - marker < 5:
+                # Balken im roten Bereich. Ist er gerade dort hinein zurückgelaufen und ist er
+                # zu schnell zum Nachschauen, wird der nächste Durchgang vorausberechnet:
+                # bis 0 % und zurück zur Markierung, dann bis zur Mitte des blauen Bereichs.
+                if last is not None and vel < 0 and speed and start is not None and span:
+                    t_exit = last[0] + (last[1] - marker) / speed
+                    fast = (1 - BAR_PRESS_FROM - BAR_PRESS_END) * span / speed < 3 * dt
+                    if fast:
+                        t_press = (t_exit + 2 * (marker - start) / speed
+                                   + 0.5 * span / speed - self.latency)
+                last, vel = None, 0.0
+                if t_press is not None and time.time() >= t_press - dt / 2:
+                    wait = t_press - time.time()
+                    if wait > 0:
+                        time.sleep(wait)
+                    self.keys.tap("space", hold=0.03)
+                    log("  LEERTASTE vorausberechnet (sehr schneller Balken).")
+                    self.last_activity = time.time()
+                    self.learn_latency(rect, marker + 0.5 * span, speed, marker, span)
+                    self.save_debug("balken_gedrueckt", self.screen.grab(self.game_rect))
+                    return
                 continue
-            if last is not None and now > last[0]:
+            t_press = None
+            if last is None:
+                # Balken kommt gerade aus dem roten Bereich -> er wächst
+                vel = speed or 0.0
+            elif now > last[0]:
                 dt = 0.7 * dt + 0.3 * (now - last[0])
-                v = (marker - last[1]) / (now - last[0])
-                # Richtungswechsel (Umkehr am Balkenende): alte Geschwindigkeit verwerfen
-                vel = v if samples == 0 or v * vel <= 0 else 0.5 * vel + 0.5 * v
-                samples += 1
-            last = (now, marker)
-            width = zone[1] - zone[0]
-            lo, hi = zone[0] + ZONE_MARGIN * width, zone[1] - ZONE_MARGIN * width
-            # wo ist die Markierung, wenn das Spiel den Tastendruck verarbeitet?
-            ahead = marker + vel * (time.time() - now + self.latency)
-            # Ziel = Zonenmitte: drücken im Bild, das ihr am nächsten kommt (nächstes Bild wäre zu spät)
-            to_center = ((zone[0] + zone[1]) / 2 - ahead) * (1 if vel >= 0 else -1)
-            if samples >= 2 and lo <= ahead <= hi and to_center <= abs(vel) * dt / 2:
+                v = (fill - last[1]) / (now - last[0])
+                if abs(v) > 1:
+                    turned = v * vel < 0
+                    if turned and vel > 0:
+                        turns += 1             # Umkehr bei 100 %
+                    if not turned:             # über eine Umkehr gemessen wäre das Tempo zu klein
+                        speed = abs(v) if speed is None else 0.7 * speed + 0.3 * abs(v)
+                    # Richtung aus der Messung, Tempo aus dem Mittel (stabiler)
+                    vel = float(np.copysign(speed if speed else abs(v), v))
+            last = (now, fill)
+            if vel == 0:
+                continue
+            span = end - marker
+            if speed and (1 - BAR_PRESS_FROM - BAR_PRESS_END) * span / speed < 3 * dt and start is not None:
+                continue                       # zu schnell zum Nachschauen -> vorausberechnen (s. o.)
+            lo = marker + BAR_PRESS_FROM * span
+            hi = end - BAR_PRESS_END * span
+            # wo ist der Balken, wenn das Spiel den Tastendruck verarbeitet?
+            ahead = fill + vel * (time.time() - now + self.latency)
+            # beim Wachsen drücken; erst nach 2 Umkehrungen (Zeit wird knapp) auch beim Zurücklaufen
+            if lo <= ahead <= hi and (vel > 0 or turns >= 2):
                 self.keys.tap("space", hold=0.03)
-                log("  LEERTASTE bei der blauen Zone.")
+                log(f"  LEERTASTE - Balken bei {(ahead - marker) / span * 100:.0f} % des blauen Bereichs.")
                 self.last_activity = time.time()
-                self.learn_latency(rect, ahead, vel, zone)
+                self.learn_latency(rect, ahead, vel, marker, span)
                 self.save_debug("balken_gedrueckt", self.screen.grab(self.game_rect))
                 return
         log("Balken-Spiel: Zeit abgelaufen.")
 
-    def learn_latency(self, rect, ahead, vel, zone):
+    def learn_latency(self, rect, ahead, vel, marker, span):
         """Wo ist der Balken stehen geblieben? Daraus die Reaktionszeit des Spiels nachlernen."""
         stops = []
         for _ in range(3):
             self.ctl.sleep(0.12)
-            _, m = read_bar(cv2.cvtColor(self.screen.grab(rect), cv2.COLOR_BGR2HSV))
-            stops.append(m)
-        if None in stops or max(stops) - min(stops) > 2 or abs(vel) < 50:
-            return                                  # Balken weg oder läuft weiter -> nichts lernen
+            m, f, _, _ = read_bar(cv2.cvtColor(self.screen.grab(rect), cv2.COLOR_BGR2HSV))
+            if m is None:
+                return                              # Balken weg -> nichts zu lernen
+            stops.append(marker - 0.5 * span if f is None else f)   # kein Blau = im Roten
+        if max(stops) - min(stops) > 2:
+            return                                  # Balken läuft weiter -> nichts lernen
         stop = stops[-1]
-        inside = zone[0] <= stop <= zone[1]
-        pct = (stop - zone[0]) / max(1, zone[1] - zone[0]) * 100
-        log(f"  Balken steht bei {pct:.0f} % der blauen Zone " + ("- TREFFER" if inside else "- daneben"))
-        err = (stop - ahead) / vel                   # > 0: Spiel reagiert später als gedacht
-        new = float(np.clip(self.latency + 0.6 * err, 0.0, 0.25))
+        pct = (stop - marker) / span * 100
+        log(f"  Balken steht bei {pct:.0f} % des blauen Bereichs" + (" - TREFFER" if pct > 0 else " - im Roten!"))
+        if abs(vel) < 50:
+            return
+        if stop < marker:
+            step = 0.02                              # schon umgedreht und im Roten -> Spiel reagiert später
+        else:
+            err = (stop - ahead) / vel               # > 0: Spiel reagiert später als gedacht
+            step = float(np.clip(0.6 * err, -0.02, 0.02))  # pro Runde höchstens 20 ms nachstellen
+        new = float(np.clip(self.latency + step, 0.0, 0.25))
         if abs(new - self.latency) >= 0.003:
             self.latency = new
             log(f"  Reaktionszeit nachgelernt: {self.latency * 1000:.0f} ms")
@@ -626,13 +717,16 @@ def run_test(path):
     bar = find_bar(hsv)
     if bar:
         y1, y2, x1, x2 = bar
-        zone, marker = read_bar(hsv[y1:y2, x1:x2])
-        print(f"Balken: Zeilen {y1}-{y2}, blaue Zone x={zone[0] + x1}-{zone[1] + x1}" if zone else "Balken: keine Zone",
-              f", Markierung x={marker + x1:.0f}" if marker is not None else ", keine Markierung")
-        if zone:
-            cv2.rectangle(out, (x1 + zone[0], y1), (x1 + zone[1], y2), (255, 255, 0), 2)
+        marker, fill, end, start = read_bar(hsv[y1:y2, x1:x2])
+        fmt = lambda v: "-" if v is None else f"{v + x1:.0f}"
+        print(f"Balken: Zeilen {y1}-{y2}, Markierung x={fmt(marker)}, blauer Balken bis x={fmt(fill)}, "
+              f"100 % bei x={fmt(end)}, 0 % bei x={fmt(start)}")
         if marker is not None:
             cv2.line(out, (int(x1 + marker), y1 - 6), (int(x1 + marker), y2 + 6), (0, 0, 255), 2)
+        if fill is not None:
+            cv2.line(out, (int(x1 + fill), y1 - 6), (int(x1 + fill), y2 + 6), (255, 255, 0), 2)
+        if end is not None:
+            cv2.line(out, (int(x1 + end), y1 - 6), (int(x1 + end), y2 + 6), (0, 255, 0), 2)
     else:
         print("Balken: keiner")
     keys, cells = read_qte(hsv)
